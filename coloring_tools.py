@@ -289,7 +289,7 @@ def download_files_from_list(file_list_path, download_folder='downloads'):
                             # PNG로 저장
                             img.save(png_file_path)
                             # 원본 파일 삭제
-                            os.r(file_path)
+                            os.remove(file_path)
                             print(f"Downloaded and converted {file_name} to PNG format in {download_folder}")
                         else:
                             print(f"Downloaded {file_name} to {download_folder}")
