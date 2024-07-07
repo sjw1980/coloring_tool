@@ -126,9 +126,17 @@ def make_one_image(path, ext):
         full_path = os.path.join(path, file)
         
         try:
-            remove_texts(full_path)
-            img = Image.open(full_path)
-            images.append(img)
+            cv2_image = cv2.imread(full_path)
+
+            cv2_image = remove_texts(cv2_image)
+            cv2_image = remove_margin(cv2_image)
+
+            # BGR에서 RGB로 색상 순서를 변환합니다.
+            cv2_image = cv2.cvtColor(cv2_image, cv2.COLOR_BGR2RGB)
+
+            pil_image = Image.fromarray(cv2_image)
+            images.append(pil_image)
+
         except IOError:
             print(f"Cannot open {file}")
 
@@ -291,47 +299,52 @@ def download_files_from_list(file_list_path, download_folder='downloads'):
                 except Exception as e:
                     print(f"Error downloading {url}: {e}")
 
-def remove_texts(path, overwrite=True):
+def remove_texts(cv_image, show_image = False):
     # 이미지 로드
-    image = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+    thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
 
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15,3))
+    close = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+
+    dilate_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5,3))
+    dilate = cv2.dilate(close, dilate_kernel, iterations=1)
+
+    cnts = cv2.findContours(dilate, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts = cnts[0] if len(cnts) == 2 else cnts[1]
+    for c in cnts:
+        area = cv2.contourArea(c)
+        if area > 800 and area < 15000:
+            x,y,w,h = cv2.boundingRect(c)
+            cv2.rectangle(cv_image, (x, y), (x + w, y + h), (255,255,255), -1)
     
-    image_height, image_width = image.shape  # 그레이스케일 이미지의 높이와 너비
-    image_area = image_height * image_width  # 원본 이미지의 면적
+    if(show_image):
+        #결과 이미지 표시
+        cv2.imshow('Image with Text Boxes', cv_image)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
 
+    return cv_image
 
-    # Pytesseract를 사용하여 OCR 수행
-    # include_boxes=True를 설정하여 bounding box 정보를 포함시킵니다.
-    data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+def remove_margin(cv_image, show_image = False):
+    gray = 255*(cv_image < 128).astype(np.uint8) # 이미지 반전 및 텍스트를 흰색으로 만듦
 
-    # 텍스트 위치 정보 추출
-    n_boxes = len(data['level'])
-    for i in range(n_boxes):
-        if int(data['conf'][i]) > 60:  # 신뢰도가 60 이상인 경우에만
-            (x, y, w, h) = (data['left'][i], data['top'][i], data['width'][i], data['height'][i])
-            rectangle_area = w * h  # 사각형의 면적
-
-            print('found text:', x, y, w, h)
-            # 사각형의 면적이 원본 이미지 면적의 10%보다 작은지 확인
-            if rectangle_area < (image_area * 0.2):
-                mask = np.zeros(image.shape[:2], np.uint8)
-                mask[y:y+h, x:x+w] = 255
-                cv2.rectangle(image, (x, y), (x + w, y + h), (255, 255, 255), -1)
-
-
-    
-    gray = 255*(image < 128).astype(np.uint8) # 이미지 반전 및 텍스트를 흰색으로 만듦
+    if len(gray.shape) > 2 and gray.shape[2] == 3: # BGR 이미지인 경우
+        gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+    elif len(gray.shape) > 2 and gray.shape[2] == 1: # 단일 채널이지만 추가 차원이 있는 경우
+        gray = gray[:, :, 0]
+        
     coords = cv2.findNonZero(gray) # 모든 비-제로(텍스트가 있는) 포인트 찾기
     x, y, w, h = cv2.boundingRect(coords) # 최소 경계 사각형 찾기
-    rect = image[y:y+h, x:x+w] # 원본 이미지에서 이미지 자르기
-    
-    if(overwrite):
-        cv2.imwrite(path, rect)
-    else:
+    rect = cv_image[y:y+h, x:x+w] # 원본 이미지에서 이미지 자르기
+
+    if(show_image):
         #결과 이미지 표시
         cv2.imshow('Image with Text Boxes', rect)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
+
+    return rect
 
 def auto_process(url, search):
     fetch_all_media(url, search)
@@ -339,7 +352,48 @@ def auto_process(url, search):
     make_one_image(search, '.png')
     make_image_to_pdf(search, '.jpg')
 
+def is_grayscale_or_bw(image):    
+    # Check if the image has only one channel
+    if len(image.shape) == 2:
+        # The image is grayscale
+        return True
+    elif len(image.shape) == 3 and image.shape[2] == 1:
+        # The image is grayscale (with a single channel in the third dimension)
+        return True
+    elif len(image.shape) == 3:
+        # Additional check for black and white
+        # Convert to grayscale
+        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        # Check if all pixels are either 0 or 255
+        unique_values = np.unique(gray_image)
+        if np.all(np.isin(unique_values, [0, 255])):
+            # The image is black and white
+            return True
+    # The image is not grayscale or black and white
+    return False
 
+def test_code(path):
+    image = cv2.imread(path)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15,3))
+    close = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+
+    dilate_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5,3))
+    dilate = cv2.dilate(close, dilate_kernel, iterations=1)
+
+    cnts = cv2.findContours(dilate, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts = cnts[0] if len(cnts) == 2 else cnts[1]
+    for c in cnts:
+        area = cv2.contourArea(c)
+        if area > 800 and area < 15000:
+            x,y,w,h = cv2.boundingRect(c)
+            cv2.rectangle(image, (x, y), (x + w, y + h), (222,228,251), -1)
+
+    cv2.imshow('image', image)
+    cv2.waitKey()
+    
 #download_one_image('https://mondaymandala.com/hello-kitty-coloring-pages/', '.pdf')
 #download_one_image('https://mondaymandala.com/keroppi-coloring-pages/', '.pdf')
 #download_one_image('https://mondaymandala.com/my-melody-coloring-pages/', '.pdf')
@@ -358,9 +412,8 @@ def auto_process(url, search):
 #make_one_image('pochacco', '.png')
 #make_image_to_pdf('pochacco', '.jpg')
 
-# remove_texts('sanrio-kuromi.png')
+#test=remove_texts(cv2.imread('adorable-kuromi.png'), True)
+#remove_margin(test, True)
 
-#auto_process('https://www.just-coloring-pages.com/wp-json/wp/v2/media', 'kuromi')
+auto_process('https://www.just-coloring-pages.com/wp-json/wp/v2/media', 'kuromi')
 
-
-remove_texts('adorable-kuromi.png', False)
